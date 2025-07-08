@@ -36,8 +36,9 @@ parser = argparse.ArgumentParser(description=description)
 
 parser.add_argument('--ctrl_mode', metavar='ctrl_mode', type=str,
                     choices=['MPC',
-                             "N_CTRL"],
-                    default='N_CTRL',
+                             "Nominal",
+                             "lqr"],
+                    default="MPC",
                     help='Control mode. Currently available: ' +
                     '----manual: manual constant control specified by action_manual; ' +
                     '----nominal: nominal controller, usually used to benchmark optimal controllers;' +                     
@@ -49,7 +50,7 @@ parser.add_argument('--dt', type=float, metavar='dt',
                     default=0.1,
                     help='Controller sampling time.' )
 parser.add_argument('--t1', type=float, metavar='t1',
-                    default=30,
+                    default=20,
                     help='Final time of episode.' )
 parser.add_argument('--Nruns', type=int,
                     default=1,
@@ -67,7 +68,7 @@ parser.add_argument('--action_manual', type=float,
                     default=[-5, -3], nargs='+',
                     help='Manual control action to be fed constant, system-specific!')
 parser.add_argument('--Nactor', type=int,
-                    default=6,
+                    default=10,
                     help='Horizon length (in steps) for predictive controllers.')
 parser.add_argument('--pred_step_size_multiplier', type=float,
                     default=5.0,
@@ -81,9 +82,12 @@ parser.add_argument('--run_obj_struct', type=str,
                              'biquadratic'],
                     help='Structure of running objective function.')
 parser.add_argument('--R1_diag', type=float, nargs='+',
-                    default=[100, 100, 10, 0, 0],
+                    default=[100, 100, 10, 10, 5],
                     help='Parameter of running objective function. Must have proper dimension. ' +
                     'Say, if chi = [observation, action], then a quadratic running objective reads chi.T diag(R1) chi, where diag() is transformation of a vector to a diagonal matrix.')
+parser.add_argument('--Qf', type=float, nargs='+',
+                    default=[100,100,10])
+
 parser.add_argument('--R2_diag', type=float, nargs='+',
                     default=[1, 10, 1, 0, 0],
                     help='Parameter of running objective function . Must have proper dimension. ' + 
@@ -99,7 +103,7 @@ parser.add_argument('--critic_period_multiplier', type=float,
                     default=1.0,
                     help='Critic is updated every critic_period_multiplier times dt seconds.')
 parser.add_argument('--critic_struct', type=str,
-                    default='quad-mix', choices=['quad-lin',
+                    default='quadratic', choices=['quad-lin',
                                                    'quadratic',
                                                    'quad-nomix',
                                                    'quad-mix',
@@ -190,9 +194,9 @@ rtol = 1e-2
 
 # xy-plane
 xMin = -4#-1.2
-xMax = 0.2
+xMax = 2
 yMin = -4#-1.2
-yMax = 0.2
+yMax = 2
 
 # Control constraints
 v_min = -0.22 *10
@@ -201,6 +205,7 @@ omega_min = -2.84
 omega_max = 2.84
 
 ctrl_bnds=np.array([[v_min, v_max], [omega_min, omega_max]])
+# ctrl_bnds=np.zeros((2,2))
 
 #----------------------------------------Initialization : : system
 my_sys = systems.Sys3WRobotNI(sys_type="diff_eqn", 
@@ -219,12 +224,50 @@ observation_init = my_sys.out(state_init)
 xCoord0 = state_init[0]
 yCoord0 = state_init[1]
 alpha0 = state_init[2]
-alpha_deg_0 = alpha0/2/np.pi
+alpha_deg_0 = alpha0/2*np.pi
 
 #----------------------------------------Initialization : : model
 
 #----------------------------------------Initialization : : controller
-my_ctrl_nominal = None 
+
+target_x=0.0
+target_y=0.0
+target_theta=0.0
+dt=0.1
+# my_ctrl_nominal = controllers.N_CTRL(k_rho=1.0, k_alpha=4.0, k_beta=-1.5, # Example gains, vary for Experiment A
+#         target_x=target_x, target_y=target_y, target_theta=target_theta,
+#         sampling_time=dt,
+#         dim_input=dim_input, dim_output=dim_output
+#     )
+
+
+#  Nominal forward velocity for linearization
+v_nom =0.001
+
+# Linearized discrete system (unit time step)
+A = np.array([
+    [1, 0, -v_nom * dt*np.sin(0)],
+    [0, 1,  v_nom *dt* np.cos(0)],
+    [0, 0, 1]
+])
+
+# print(A)
+
+B = np.array([
+    [dt*np.cos(0), 0],
+    [dt*np.sin(0), 0],
+    [0, dt]
+])
+
+# ===============================
+# 2. Define cost matrices
+# ===============================
+
+Q = np.diag([5.0, 5.0, 15.0])  # Penalizes position + orientation errors
+R = np.diag([10.0, 2.0])         # Penalizes control effort
+
+my_ctrl_lqr=controllers.LQR(A=A,B=B,Q=Q,R=R,obs_target=np.array([0.0,0.0,0.0]),sampling_time=dt)
+
 
 # Predictive optimal controller
 my_ctrl_opt_pred = controllers.ControllerOptimalPredictive(dim_input,
@@ -245,8 +288,8 @@ my_ctrl_opt_pred = controllers.ControllerOptimalPredictive(dim_input,
                                            critic_period = critic_period,
                                            critic_struct = critic_struct,
                                            run_obj_struct = run_obj_struct,
-                                           run_obj_pars = [R1],
-                                           observation_target = [],
+                                           run_obj_pars = [R1,Qf],
+                                           observation_target = [0.0,0.0,0.0],
                                            state_init=state_init,
                                            obstacle=[xdistortion_x, ydistortion_y,distortion_sigma],
                                            seed=seed)
@@ -311,6 +354,12 @@ if is_print_sim_step:
     warnings.filterwarnings('ignore')
     
 my_logger = loggers.Logger3WRobotNI()
+my_ctrl_nominal=controllers.N_CTRL(k_rho=0.2, k_alpha=0.3, k_beta=-0.1, # Example gains, vary for Experiment A
+        target_x=0.0, target_y=0.0, target_theta=0.0,
+        sampling_time=dt,
+        dim_input=dim_input, dim_output=dim_output)
+
+# my_ctrl_lqr=controllers.LQR(A=np.diag([2.0,3.0,4.0]),B=np.diag([2.0,3.0]),Q=np.diag([1.0,2.0,3.0]),R=np.diag([3.0,4.0]),obs_target=np.array([0.0,0.0,0.0]))
 
 #----------------------------------------Main loop
 state_full_init = my_simulator.state_full
@@ -320,6 +369,7 @@ if is_visualization:
                                                      my_sys,
                                                      my_ctrl_nominal,
                                                      my_ctrl_benchm,
+                                                     my_ctrl_lqr,
                                                      datafiles,
                                                      controllers.ctrl_selector,
                                                      my_logger),
@@ -366,7 +416,7 @@ else:
         
         t, state, observation, state_full = my_simulator.get_sim_step_data()
         
-        action = controllers.ctrl_selector(t, observation, action_manual, my_ctrl_nominal, my_ctrl_benchm, ctrl_mode)
+        action = controllers.ctrl_selector(t, observation, action_manual, my_ctrl_nominal, my_ctrl_benchm,my_ctrl_lqr, ctrl_mode)
         
         my_sys.receive_action(action)
         my_ctrl_benchm.receive_sys_state(my_sys._state)
@@ -379,8 +429,8 @@ else:
         run_obj = my_ctrl_benchm.run_obj(observation, action)
         accum_obj = my_ctrl_benchm.accum_obj_val
         
-        count_CALF = my_ctrl_benchm.D_count()
-        count_N_CTRL = my_ctrl_benchm.get_N_CTRL_count()
+        # count_CALF = my_ctrl_benchm.D_count()
+        # count_N_CTRL = my_ctrl_benchm.get_N_CTRL_count()
 
         if is_print_sim_step:
             my_logger.print_sim_step(t, xCoord, yCoord, alpha, run_obj, accum_obj, action)
@@ -396,6 +446,8 @@ else:
             
             if ctrl_mode != 'nominal':
                 my_ctrl_benchm.reset(t0)
+            elif ctrl_mode=='lqr':
+                my_ctrl_lqr.reset(t0)
             else:
                 my_ctrl_nominal.reset(t0)
             

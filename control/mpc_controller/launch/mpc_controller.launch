@@ -1,0 +1,7 @@
+<launch>
+   <node name ="Mpc_controller"
+    pkg ="mpc_controller"
+    type ="mpc_controller.py"
+    output ="screen">
+</node>
+</launch>

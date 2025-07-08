@@ -10,12 +10,13 @@ from utilities import push_vec
 import models
 import numpy as np
 import scipy as sp
+from scipy.linalg import solve_discrete_are
 from numpy.random import rand
 from scipy.optimize import minimize
 from scipy.optimize import basinhopping
 from scipy.optimize import NonlinearConstraint
 from scipy.stats import multivariate_normal
-from numpy.linalg import lstsq
+from numpy.linalg import lstsq 
 from numpy import reshape
 import warnings
 import math
@@ -23,7 +24,7 @@ import math
 from tabulate import tabulate
 import os
 
-def ctrl_selector(t, observation, action_manual, ctrl_nominal, ctrl_benchmarking, mode):
+def ctrl_selector(t, observation, action_manual, ctrl_nominal, ctrl_benchmarking, ctrl_lqr, mode):
     """
     Main interface for various controllers.
 
@@ -41,8 +42,10 @@ def ctrl_selector(t, observation, action_manual, ctrl_nominal, ctrl_benchmarking
     
     if mode=='manual': 
         action = action_manual
-    elif mode=='nominal': 
+    elif mode=='Nominal': 
         action = ctrl_nominal.compute_action(t, observation)
+    elif mode=='lqr':
+        action=ctrl_lqr.compute_action(t,observation)
     else: # Controller for benchmakring
         action = ctrl_benchmarking.compute_action(t, observation)
         
@@ -277,7 +280,7 @@ class ControllerOptimalPredictive:
             """        
 
         np.random.seed(seed)
-        print(seed)
+        # print(seed)
 
         self.dim_input = dim_input
         self.dim_output = dim_output
@@ -308,7 +311,8 @@ class ControllerOptimalPredictive:
         
         
         self.action_buffer = np.zeros( [buffer_size, dim_input] )
-        self.observation_buffer = np.zeros( [buffer_size, dim_output] )        
+        self.observation_buffer = np.zeros( [buffer_size, dim_output] )    
+        self.t=0    
         
         # Exogeneous model's things
         self.sys_rhs = sys_rhs
@@ -328,7 +332,7 @@ class ControllerOptimalPredictive:
         self.observation_target = observation_target
         
         self.accum_obj_val = 0
-        print('---Critic structure---', self.critic_struct)
+        # print('---Critic structure---', self.critic_struct)
 
         if self.critic_struct == 'quad-lin':
             self.dim_critic = int( ( ( self.dim_output + self.dim_input ) + 1 ) * ( self.dim_output + self.dim_input )/2 + (self.dim_output + self.dim_input) ) 
@@ -354,7 +358,11 @@ class ControllerOptimalPredictive:
             self.dim_critic = int( ( ( self.dim_output + self.dim_input ) + 1 ) * ( self.dim_output + self.dim_input )/2 * 3)
             self.Wmin = np.zeros(self.dim_critic) 
             self.Wmax = np.ones(self.dim_critic) 
-        self.N_CTRL = N_CTRL()
+        self.N_CTRL = N_CTRL(k_rho=1.0, k_alpha=4.0, k_beta=-1.5, # Example gains, vary for Experiment A
+        target_x=0.0, target_y=0.0, target_theta=0.0,
+        sampling_time=sampling_time,
+        dim_input=dim_input, dim_output=dim_output)
+    
 
     def reset(self,t0):
         """
@@ -396,16 +404,57 @@ class ControllerOptimalPredictive:
         """
         self.accum_obj_val += self.run_obj(observation, action)*self.sampling_time
                  
-    def run_obj(self, observation, action):
+    def run_obj(self, observation, action,terminal=False):
         """
         Running (equivalently, instantaneous or stage) objective. Depending on the context, it is also called utility, reward, running cost etc.
         
         See class documentation.
         """
-        run_obj = 1
-        #####################################################################################################
-        ################################# write down here cost-function #####################################
-        #####################################################################################################
+        observation_arr = np.array(observation)
+        action_arr = np.array(action)
+
+        # Handle observation target: calculate error if a target is provided
+        self.observation_target=np.array([0.0,0.0,0.0])
+        observation_err = observation_arr - self.observation_target
+        
+        # Form the combined state-action vector chi
+        chi = np.concatenate((observation_err, action_arr))
+        run_obj=0
+
+        
+
+        # if self.t==self.Nactor-1:
+        #     terminal=True
+
+        if self.run_obj_struct == 'quadratic':
+            # run_obj_pars should be [R1] where R1 is a matrix for chi.T @ R1 @ chi
+            if not self.run_obj_pars or len(self.run_obj_pars) < 1:
+                warnings.warn("run_obj_pars is empty or malformed for 'quadratic' mode. Returning 0 for running objective.")
+                return 0.0 # Return a float
+            R1 = np.array(self.run_obj_pars[0])
+            # print(R1)
+            # Check dimensions for compatibility: R1 must be square and match chi's dimension
+            expected_dim = chi.shape[0]
+            if R1.shape != (expected_dim, expected_dim):
+                warnings.warn(f"R1 matrix dimension mismatch. Expected {expected_dim}x{expected_dim}, got {R1.shape}. Returning 0 for running objective.")
+                return 0.0 # Return a float
+            run_obj = chi.T @ R1 @ chi
+            self.t+=1
+            # print(self.t)
+
+            # Add terminal cost if requested
+            if terminal:
+                if len(self.run_obj_pars) < 2:
+                    warnings.warn("Qf not provided in run_obj_pars for terminal cost. Skipping terminal cost.")
+                else:
+                    Qf = np.array(self.run_obj_pars[1])
+                    obs_dim = observation_err.shape[0]
+                    if Qf.shape != (obs_dim, obs_dim):
+                        warnings.warn(f"Qf matrix dimension mismatch. Expected {obs_dim}x{obs_dim}, got {Qf.shape}. Skipping terminal cost.")
+                    else:
+                        run_obj += observation_err.T @ Qf @ observation_err
+                    
+                    
 
         return run_obj
 
@@ -428,13 +477,17 @@ class ControllerOptimalPredictive:
         observation_sqn[0, :] = observation
         state = self.state_sys
         for k in range(1, self.Nactor):
-            state = state + self.pred_step_size * self.sys_rhs([], state, my_action_sqn[k-1, :])  # Euler scheme
+            state = state + self.pred_step_size * self.sys_rhs(0.01, state, my_action_sqn[k-1, :])  # Euler scheme
             
             observation_sqn[k, :] = self.sys_out(state)
         
         J = 0         
         if self.mode=='MPC':
             for k in range(self.Nactor):
+                
+                if k==self.Nactor-1:
+                    J+=self.gamma**k * self.run_obj(observation_sqn[k, :], my_action_sqn[k, :],terminal=True)
+
                 J += self.gamma**k * self.run_obj(observation_sqn[k, :], my_action_sqn[k, :])
 
         return J
@@ -514,6 +567,8 @@ class ControllerOptimalPredictive:
         except ValueError:
             print('Actor''s optimizer failed. Returning default action')
             action_sqn = self.action_curr
+
+        ##print(action_sqn)
         
         return action_sqn[:self.dim_input]    # Return first action
                     
@@ -533,29 +588,245 @@ class ControllerOptimalPredictive:
         if time_in_sample >= self.sampling_time: # New sample
             # Update controller's internal clock
             self.ctrl_clock = t
+
+            action = None
             
             if self.mode == 'MPC':  
                 
                 action = self._actor_optimizer(observation)
+                # print(action.shape)
 
-            elif self.mode == "N_CTRL":
+            elif self.mode == "Nominal":
                 
-                action = self.N_CTRL.pure_loop(observation)
-            
-            self.action_curr = action
+                action = self.N_CTRL.compute_action(observation)
+            if action is not None:
+               self.action_curr = action
+        
             
             return action    
     
         else:
             return self.action_curr
 
+
+
+# New/Updated N_CTRL Class
 class N_CTRL:
+    def __init__(self, k_rho=2.5, k_alpha=-3.5, k_beta=2.5,
+                 target_x=0.0, target_y=0.0, target_theta=0.0,
+                 sampling_time=0.01, dim_input=2, dim_output=3): # Added dim_input/output for consistency
+        self.k_rho = k_rho
+        self.k_alpha = k_alpha
+        self.k_beta = k_beta
+        self.dt = sampling_time # Use sampling_time for internal dt consistency
 
-        #####################################################################################################
-        ########################## write down here nominal controller class #################################
-        #####################################################################################################
+        self.target_x = target_x
+        self.target_y = target_y
+        self.target_theta = target_theta
 
-        return [v,w]
+        self.ctrl_clock = 0.0 # Initial time for the controller's internal clock
+        self.sampling_time = sampling_time
+        self.action_curr = np.array([0.0, 0.0]) # Initialize current action to zero
+        self.accum_obj_val = 0.0 # Initialize accumulated objective value
+        self.dim_input = dim_input
+        self.dim_output = dim_output
+
+        # Dummy attributes for compatibility with logger/visualizer
+        self.state_sys = np.zeros(dim_output) # N_CTRL doesn't use this directly, but visualizer might expect it.
+                                             # It will be updated by receive_sys_state if called.
+
+    def wrap_angle(self, angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle <= -math.pi:
+            angle += 2 * math.pi
+        return angle
+
+    def compute_action(self, t, observation):
+        """
+        Computes the control action for the 3-wheel robot.
+        """
+        time_in_sample = t - self.ctrl_clock
+
+        if t >= self.ctrl_clock + self.sampling_time - 1e-6:
+
+            self.ctrl_clock = t # Update controller's internal clock
+
+            # print(observation)
+
+            x, y, th = observation
+            x_f = self.target_x
+            y_f = self.target_y
+            th_f = self.target_theta
+
+            dx = x_f - x
+            dy = y_f - y
+            rho = math.sqrt(dx**2 + dy**2)
+
+            alpha = self.wrap_angle(-th + math.atan2(dy, dx))
+            beta = self.wrap_angle((th_f - th) - alpha)
+
+            # Debug prints - these are very useful!
+            print(f"t: {t:.2f}, Obs: ({x:.2f}, {y:.2f}, {th:.2f})")
+            print(f"Target: ({x_f:.2f}, {y_f:.2f}, {th_f:.2f})")
+            # print(f"Errors: rho={rho:.4f}, alpha={alpha:.4f}, beta={beta:.4f}")
+
+            # Define a small tolerance for "at target"
+            pos_tolerance = 0.05 # meters
+            angle_tolerance = 0.05 # radians
+
+            if rho < pos_tolerance:
+                if abs(self.wrap_angle(th_f - th)) < angle_tolerance:
+                    v = 0.0
+                    w = 0.0
+                # print("--> At target, stopping. v=0, w=0")
+            else:
+                v = self.k_rho * rho
+                w = self.k_alpha * alpha + self.k_beta * beta
+                # print(f"--> Control action: v={v:.4f}, w={w:.4f}")
+
+            v = np.clip(v, -1, 1)
+            w = np.clip(w, -1.0, 1.0)
+
+
+            self.action_curr = np.array([v, w])
+            return self.action_curr
+        else:
+            return self.action_curr # Return the last computed action if not a new sample
+
+    def reset(self, t0):
+        """
+        Resets controller for new episode.
+        """
+        self.ctrl_clock = t0
+        self.action_curr = np.array([0.0, 0.0])
+        self.accum_obj_val = 0.0 # Reset accumulated objective
+
+    def receive_sys_state(self, state):
+        """
+        Placeholder method for compatibility with the simulation framework.
+        N_CTRL doesn't actively use the full system state for its internal logic,
+        but the main simulation loop might try to pass it.
+        """
+        self.state_sys = state # Store it just in case, or do nothing if truly not needed.
+
+    def upd_accum_obj(self, observation, action):
+        """
+        Accumulates the running objective for performance evaluation.
+        """
+        self.accum_obj_val += self.run_obj(observation, action) * self.sampling_time
+
+    def run_obj(self, observation, action):
+        """
+        Calculates a running objective (cost) for the N_CTRL.
+        This is primarily for logging and visualization, not for the controller's internal logic.
+        """
+        x, y, th = observation
+        x_f = self.target_x
+        y_f = self.target_y
+        th_f = self.target_theta
+
+        # Cost components: position error squared and orientation error squared, and control effort.
+        pos_cost = (x - x_f)**2 + (y - y_f)**2
+        # Use a proper angle difference for orientation cost
+        orientation_cost = self.wrap_angle(th - th_f)**2
+
+        # Control effort cost (e.g., squared velocities)
+        v, w = action
+        control_effort_cost = 0.1 * (v**2 + w**2) # Small weight on control effort
+
+        # You can tune these weights
+        total_cost = pos_cost * 10 + orientation_cost * 5 + control_effort_cost
+        return total_cost
+    
+class LQR:
+    def __init__(self,A,B,Q,R,obs_target=[0.0,0.0,0.0],sampling_time=0.01,):
+        self.A=A
+        self.B=B
+        self.Q=Q 
+        self.R=R
+        self.observation_target=obs_target
+        self.ctrl_clock = 0.0 
+        self.sampling_time =sampling_time
+        self.action_curr = np.array([0.0, 0.0]) # Initialize current action to zero
+        self.accum_obj_val = 0.0
+
+    def compute_gain(self):
+
+        # Solve the Discrete Algebraic Riccati Equation (DARE)
+        P = solve_discrete_are(self.A, self.B, self.Q, self.R)
+
+        K=np.linalg.inv(self.R+self.B.T@P@self.B)@self.B.T@P@self.A
+
+        return K
+
+    def compute_action(self,t,observation):
+        # time_in_sample = t - self.ctrl_clock
+
+        if t >= self.ctrl_clock + self.sampling_time - 1e-6:
+
+            self.ctrl_clock = t # Update controller's internal clock
+
+            # print(observation)
+            # observation_target=[]
+
+            state_err = observation - self.observation_target
+            # print(state_err.shape)
+
+            self.K=self.compute_gain()
+
+
+            u=-self.K@state_err
+            # print(u)
+
+            # x=self.A@state_err +self.B@u
+
+            self.action_curr = u
+
+            # print(x)
+            return self.action_curr
+        else:
+            return self.action_curr #
+        
+
+    def reset(self, t0):
+        """
+        Resets controller for new episode.
+        """
+        self.ctrl_clock = t0
+        self.action_curr = np.array([0.0, 0.0])
+        self.accum_obj_val = 0.0 # Reset accumulated objective
+
+    def receive_sys_state(self, state):
+        """
+        Placeholder method for compatibility with the simulation framework.
+        N_CTRL doesn't actively use the full system state for its internal logic,
+        but the main simulation loop might try to pass it.
+        """
+        self.state_sys = state # Store it just in case, or do nothing if truly not needed.
+
+    def upd_accum_obj(self, observation, action):
+        """
+        Accumulates the running objective for performance evaluation.
+        """
+        self.accum_obj_val += self.run_obj(observation, action) * self.sampling_time
+
+    def run_obj(self, observation, action):
+        """
+        Calculates a running objective (cost) for the N_CTRL.
+        This is primarily for logging and visualization, not for the controller's internal logic.
+        """
+        state_error = np.diag(observation - self.observation_target)
+        action=np.diag(action)
+        running_cost = state_error.T @ self.Q @ state_error 
+        # action.T @ self.R@ action
+
+        # print(running_cost.shape)
+        return np.linalg.det(running_cost)
+    
+    
+        
+
 
 
 

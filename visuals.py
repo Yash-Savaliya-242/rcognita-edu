@@ -93,7 +93,7 @@ class Animator3WRobotNI(Animator):
         self.pars = pars
         
         # Unpack entities
-        self.simulator, self.sys, self.ctrl_nominal, self.ctrl_benchmarking, self.datafiles, self.ctrl_selector, self.logger = self.objects
+        self.simulator, self.sys, self.ctrl_nominal, self.ctrl_benchmarking,self.ctrl_lqr, self.datafiles, self.ctrl_selector, self.logger = self.objects
         
         state_init, \
         action_init, \
@@ -131,12 +131,12 @@ class Animator3WRobotNI(Animator):
         xCoord0 = state_init[0]
         yCoord0 = state_init[1]
         alpha0 = state_init[2]
-        alpha_deg0 = alpha0/2/np.pi
+        alpha_deg0 = alpha0/(2*np.pi)
         
         plt.close('all')
 
-        print(v_min, v_max, omega_min, omega_max)
-     
+        # print(v_min, v_max, omega_min, omega_max)
+    #  
         self.fig_sim = plt.figure(figsize=(10,10))    
             
         # xy plane  
@@ -163,7 +163,7 @@ class Animator3WRobotNI(Animator):
         
         # Solution
         sol_max_on_plot = 2*np.max( np.array( [np.abs( xMin), np.abs( yMin), np.abs( yMin), np.abs( yMax)] ) )
-        self.axs_sol = self.fig_sim.add_subplot(222, autoscale_on=False, xlim=(t0,t1), ylim=( -1.1*sol_max_on_plot, 1.1*sol_max_on_plot ), xlabel='t [s]')
+        self.axs_sol = self.fig_sim.add_subplot(223, autoscale_on=False, xlim=(t0,t1), ylim=( -1.1*sol_max_on_plot, 1.1*sol_max_on_plot ), xlabel='t [s]')
         # self.axs_sol = self.fig_sim.add_subplot(222, autoscale_on=False, xlim=(t0,t1), ylim=(-20,60), xlabel='t [s]')
         self.axs_sol.plot([t0, t1], [0, 0], 'k--', lw=0.75)   # Help line
         self.line_norm, = self.axs_sol.plot(t0, la.norm([xCoord0, yCoord0]), 'b-', lw=0.5, label=r'$\Vert(x,y)\Vert$ [m]')
@@ -178,7 +178,16 @@ class Animator3WRobotNI(Animator):
             observation_init = self.sys.out(state_init)
             run_obj = self.ctrl_benchmarking.run_obj(observation_init, action_init)
         
-        self.axs_cost = self.fig_sim.add_subplot(223, autoscale_on=False, xlim=(t0,t1), ylim=(0, 1e4*run_obj), yscale='symlog', xlabel='t [s]')
+        # self.axs_cost = self.fig_sim.add_subplot(223, autoscale_on=False, xlim=(t0,t1), ylim=(0, float(1e6*run_obj+1e-5)), yscale='symlog', xlabel='t[s]')
+        self.axs_cost = self.fig_sim.add_subplot(
+    222,
+    autoscale_on=False,
+    xlim=(t0, t1),
+    ylim=(0, (1e6 * run_obj + 1e-5).item()),  # or use run_obj[0]
+    yscale='symlog',
+    xlabel='t[s]'
+)
+
         
         text_accum_obj = r'$\int \mathrm{{Run.\,obj.}} \,\mathrm{{d}}t$ = {accum_obj:2.3f}'.format(accum_obj = 0)
         self.text_accum_obj_handle = self.fig_sim.text(0.05, 0.5, text_accum_obj, horizontalalignment='left', verticalalignment='center')
@@ -190,8 +199,8 @@ class Animator3WRobotNI(Animator):
         self.axs_ctrl = self.fig_sim.add_subplot(224, autoscale_on=False, xlim=(t0,t1), ylim=(1.1*np.min([v_min, omega_min]), 1.1*np.max([v_max, omega_max])), xlabel='t [s]')
         self.axs_ctrl.plot([t0, t1], [0, 0], 'k--', lw=0.75)   # Help line
         self.lines_ctrl = self.axs_ctrl.plot(t0, to_col_vec(action_init).T, lw=0.5)
-        self.axs_ctrl.legend(iter(self.lines_ctrl), ('v [m/s]', r'$\omega$ [rad/s]'), fancybox=True, loc='upper right')
-        
+        #self.axs_ctrl.legend(iter(self.lines_ctrl), ('v [m/s]', r'$\omega$ [rad/s]'), fancybox=True, loc='upper right')
+        self.axs_ctrl.legend(self.lines_ctrl, ('v [m/s]', r'$\omega$ [rad/s]'), fancybox=True, loc='upper right')
         # Pack all lines together
         cLines = namedtuple('lines', ['line_traj', 'line_norm', 'line_alpha', 'line_run_obj', 'line_accum_obj', 'lines_ctrl'])
         self.lines = cLines(line_traj=self.line_traj,
@@ -254,7 +263,7 @@ class Animator3WRobotNI(Animator):
             while observation[2] < -np.pi:
                     observation[2] += 2 * np.pi
 
-            action = self.ctrl_selector(t, observation, self.action_manual, self.ctrl_nominal, self.ctrl_benchmarking, self.ctrl_mode)
+            action = self.ctrl_selector(t, observation, self.action_manual, self.ctrl_nominal, self.ctrl_benchmarking,self.ctrl_lqr, self.ctrl_mode)
         
             self.sys.receive_action(action)
             self.ctrl_benchmarking.receive_sys_state(self.sys._state) 

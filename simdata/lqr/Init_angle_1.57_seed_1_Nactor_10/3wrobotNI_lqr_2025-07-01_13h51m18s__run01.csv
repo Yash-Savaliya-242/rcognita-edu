@@ -1,0 +1,16 @@
+System,3wrobotNI
+Controller,lqr
+dt,0.1
+state_init,[-3.   -3.    1.57]
+Nactor,10
+pred_step_size_multiplier,5.0
+buffer_size,25
+run_obj_struct,quadratic
+R1_diag,"[100, 100, 10, 10, 5]"
+R2_diag,"[1, 10, 1, 0, 0]"
+Ncritic,25
+gamma,0.9
+critic_period_multiplier,1.0
+critic_struct,quadratic
+actor_struct,quad-nomix
+t [s],x [m],y [m],alpha [rad],run_obj,accum_obj,v [m/s],omega [rad/s]
